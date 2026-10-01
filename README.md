@@ -1,184 +1,181 @@
-# Cube Buildathon · 02 · Prep Manager
+# OpsConsole — Prep Manager
 
-**Commerce Context stream · Round 2 · Individual Build**
+**One platform, five AI Managers, one evidence chain.**
 
-> Five agents, one unit, one record that follows it.
-> A physical product arrives, gets prepped, gets shipped, comes back. At every step a person makes a fast judgment that nobody records. **You build the agent that makes one of those judgments, and leaves proof.**
-
-**New here? Read these first:**
-
-1. [`GITHUB-GUIDE.md`](GITHUB-GUIDE.md) explains how to fork the repository, set it up, build and push your work.
-2. [`RULES.md`](RULES.md) covers the repository and engineering rules.
+OpsConsole turns every physical inspection on the warehouse floor into a
+timestamped, tamper-evident evidence record. The **Prep Manager** (the judged,
+complete module) looks at photos of a prepared unit, checks it against the prep
+requirements, and returns a clear verdict with the visual evidence and the exact
+rule behind every line. The **Recovery Manager** then uses those same records to
+contradict unfair marketplace fees.
 
 ---
 
-## Your problem statement: Prep Manager
+## The problem
 
-|                              |                                                                      |
-| ---------------------------- | -------------------------------------------------------------------- |
-| **Position in the chain**    | Step 2 of 5. Inbound to Amazon.                                      |
-| **Customer**                 | Prep center owner, or self-prepping seller                           |
-| **What gets recorded**       | Compliance proof                                                     |
-| **Who consumes your output** | Recovery Manager (disputed prep fees, lost or damaged inbound units) |
+Before products ship into a fulfilment centre, every unit must be prepped to a
+strict standard (poly-bagged and sealed, suffocation warning, a scannable FNSKU
+label on a flat surface, the original barcode covered, expiry visible, handling
+marks present). Today those checks are manual and inconsistent, a work order is
+not proof, and errors surface weeks later as fees with **no evidence to dispute
+them**. OpsConsole captures the proof at the moment of prep.
 
-A unit is prepped for inbound shipment to Amazon. If the prep is wrong, Amazon charges a defect fee, and it arrives six weeks later attached to a shipment nobody can remember. The prep center has a work order saying what they were supposed to do, and their word that they did it. That is not evidence, and a meaningful share of those fees may be for defects that did not exist when the unit left the building.
+## Design principles (these are the point)
 
-**What the agent checks, from photographs of the prepped unit:**
+1. **UNCERTAIN is a valid answer.** A blurry, cropped or glary photo yields
+   `UNCERTAIN` with retake guidance — never a guess.
+2. **The AI observes; the rules decide.** Claude only *describes what it can
+   see* (`met` / `not_met` / `cant_tell` + confidence + which photo + where).
+   A fixed, transparent rules engine turns those observations into the verdict,
+   so the **same evidence always gives the same result**.
+3. **No invented rules.** Every check cites a specific clause and exact quote
+   from the prep requirements document ([`src/lib/prepRequirements.ts`](src/lib/prepRequirements.ts)).
+4. **No invented evidence.** A verdict with no visible evidence becomes
+   `UNCERTAIN`.
+5. **Honest about limits.** Physical properties (bag thickness / material) are
+   shown as `NOT VERIFIABLE`, never `PASS`.
+6. **Tamper-evident.** Each record stores a SHA-256 of every photo, the raw AI
+   response, and a timestamp.
 
-* Polybag present and correctly sealed
-* Suffocation warning present and legible, not obscured by the fold
-* FNSKU label flat, not on a seam, curve or edge
-* Original manufacturer barcode covered
-* Expiry date still legible after wrapping
-* Required handling marks: fragile, liquid, this way up
+## How it works (the pipeline)
 
-> **Look the rules up.** Amazon publishes its prep requirements. Do not infer them from examples and do not let a model guess. In a compliance check backed by an evidence record, "we retrieved something similar" is not a defensible answer.
-
-> **The hard constraint.** This touches every unit, not one in five. A prep center works on $0.40 to $1.10 per unit. Your cost per check has to live inside that.
-
-### The chain you are part of
-
-```text
- Supplier delivery      Inbound to Amazon     Outbound to buyer     Customer return        Money back
- ┌──────────────┐      ┌──────────────┐      ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
- │ 01 Receiving │ ───▶ │ 02 Prep      │ ───▶ │ 03 Pack      │ ───▶ │ 04 Returns   │      │ 05 Recovery  │
- │ condition on │      │ compliance   │      │ contents at  │      │ condition &  │      │ reads all    │
- │ arrival      │      │ proof        │      │ seal         │      │ disposition  │      │ four → claim │
- └──────┬───────┘      └──────┬───────┘      └──────┬───────┘      └──────┬───────┘      └──────▲───────┘
-        └─────────────────────┴─────────────────────┴─────────────────────┴─────────────────────┘
+```
+photos ──▶ vision.ts (Claude: OBSERVE only)      ──▶ observations JSON
+                                                      │
+product config + prepRequirements.ts (the rulebook)  ▼
+                          rules.ts (DECIDE, deterministic) ──▶ verdicts + overall
+                                                      │
+                                     store.ts  ──▶ evidence record (JSON + hashed photos)
 ```
 
-The first four are the same machine: a camera, a model, and a decision bound to a record. What changes is the ruleset, the buyer and the moment. The fifth has no camera. It turns the other four's records into a claim.
+- [`src/lib/vision.ts`](src/lib/vision.ts) — the only AI call. Claude returns
+  per-check observations, a usability rating per photo, and a literal
+  transcription of the FNSKU label. It **never** returns a verdict. Parsing is
+  validated with Zod and retried once; on any failure it falls back to
+  `available: false` and every check becomes `UNCERTAIN` (so a network/API
+  problem in the demo never crashes and never guesses).
+- [`src/lib/rules.ts`](src/lib/rules.ts) — pure function. Low confidence, no
+  evidence cited, unusable photo, or `cant_tell` → `UNCERTAIN`. FNSKU text
+  mismatch → `FAIL`. Any required `FAIL` → overall `FAIL`; else any required
+  `UNCERTAIN` → overall `UNCERTAIN (needs review)` with a retake list; else
+  `PASS`.
+- [`src/lib/store.ts`](src/lib/store.ts) — file-backed store under `data/`.
+  Records survive a restart.
 
-Your output has to be usable by another pod. That's deliberate, and it's scored.
+## The checks
 
----
+| # | Check | Photo-verifiable? |
+|---|---|---|
+| 1 | Poly-bag present | yes |
+| 2 | Poly-bag sealed | yes |
+| 3 | Suffocation warning present | yes |
+| 4 | Suffocation warning legible | yes |
+| 5 | FNSKU label present | yes |
+| 6 | FNSKU placement (flat, not on a curve/seam/edge) | yes |
+| 7 | FNSKU text matches the expected code | yes |
+| 8 | Original barcode covered | yes |
+| 9 | Expiry date visible | yes |
+| 10 | Handling marks present | yes |
+| 11 | Bag thickness / material | **no → NOT VERIFIABLE** |
 
-## Reference data
+Each check applies only where the product needs it (`NOT_APPLICABLE` otherwise).
 
-`data/` holds a **dummy** CSV for reference while you design and build. Its columns and meanings are listed in [`data/README.md`](data/README.md).
+## Run it
 
-**The data is synthetic.** The SKUs, ASINs, FNSKUs, orders, suppliers, operators and amounts are all invented. The requirement flags and fee amounts are **not** Amazon's real rules or fees. Engineering rule 5 applies: look the authoritative rule up. The `photo_refs` paths are placeholders, and no images ship with this repo. Your fixtures and eval set are yours to capture.
+Requirements: Node 18+.
 
-All five buildathon repos share the same `unit_id` values (`UNIT-0001` … `UNIT-0100`). You can follow one unit from receiving through recovery, the same way the real records will be joined. In the sample, each unit takes one route: **FBA** (prep, then Amazon ships it and charges fees) or **merchant-fulfilled / 3PL** (the seller packs it). So a unit has a Prep record or a Pack record, never both.
-
----
-
-## How this works
-
-You have a defined problem statement, supporting domain information and an engineering repository to build from. Real products are built backwards from the customer and forwards through the evidence. Understand the customer and operational workflow before writing code, then build and measure whether the solution works.
-
-Every design decision should be testable. A wrong assumption caught early costs less than the same assumption discovered after implementation. You are assessed on that as much as on running software.
-
-### What you're given
-
-* This problem statement
-* A domain brief covering the real economics, fee structures and what a working day in a warehouse looks like *(shared by the organisers)*
-* The engineering rules in [`RULES.md`](RULES.md)
-* Repository data and supporting resources
-* One fully worked package for Returns Manager (customer letter, PR/FAQ, one-pager) as a reference for the standard expected. **Read it. Don't copy it.**
-
-### What you produce
-
-Build your solution in **your own GitHub fork**.
-
-Your final Round 2 submission should include:
-
-* A working Prep Manager
-* A `README.md` explaining your solution, setup, assumptions and limitations
-* An `ARCHITECTURE.md`
-* An eval report/results with numbers and named failure modes
-* A working demo/video
-* A deployment URL, where applicable
-* Your mandatory LinkedIn post URL
-
-## Build and submission flow
-
-```text
-Understand
-    ↓
-Build
-    ↓
-Test
-    ↓
-Evaluate
-    ↓
-Document
-    ↓
-Demo / Deploy
-    ↓
-Submit
+```bash
+npm install
 ```
 
-Round 2 is an **individual build**.
+Set your Anthropic key so the vision step runs (copy `.env.example`):
 
-The official build phase begins on **25 September 2026 at 9:00 AM IST**.
-
-Submissions open from **27 September 2026**.
-
-The final submission deadline is **1 October 2026 at 6:00 PM IST**.
-
-The submission form closes permanently at the deadline. **There is no resubmission.**
-
-All code commits forming your Round 2 submission must be made during the authorised build phase. Do not continue making Round 2 code changes after the build phase ends.
-
-## What we're being straight with you about
-
-* **The core assumption is untested.** Nobody knows yet whether vision models can identify products and verify prep requirements reliably across long-tail catalogues without per-SKU training. Finding out that it doesn't hold, and documenting that clearly, counts as a useful outcome.
-* **Nobody has spoken to a customer yet.** If you can get a real prep center or seller on a call, ask them to rank the five problems by urgency. Don't ask whether they'd buy what you're building.
-* **The background documents disagree in places.** A contradiction is a finding. Raise it as an Issue labelled `finding`.
-
----
-
-## Evaluation
-
-Your Round 2 submission is evaluated out of **100 points**:
-
-| Criterion                                    |  Points |
-| -------------------------------------------- | ------: |
-| Problem Understanding & Solution Relevance   |  **15** |
-| Agent Functionality & Decision Quality       |  **25** |
-| Evaluation, Accuracy & Uncertainty Handling  |  **25** |
-| Evidence, Traceability & Engineering Quality |  **20** |
-| UX, Demo & Documentation                     |  **15** |
-| **TOTAL**                                    | **100** |
-
-For the vision-based portions of the Prep Manager, use an appropriate unseen/held-out evaluation set and report your methodology, results, false positives, false negatives, `UNCERTAIN` cases and failure modes.
-
----
-
-## Evidence and decision traceability
-
-Your Prep Manager should leave evidence behind for its decisions.
-
-At minimum, the workflow should make it possible to understand:
-
-```text
-What was being prepped?
-        ↓
-What requirements were checked?
-        ↓
-What did the agent observe?
-        ↓
-What verdict was produced?
-        ↓
-Why?
+```bash
+# .env.local
+ANTHROPIC_API_KEY=sk-ant-...
+# optional — faster/cheaper demos: PREP_VISION_MODEL=claude-sonnet-5-5
 ```
 
-Use the official evidence contract provided by the organisers as the baseline for interoperability with the other Managers.
+> Without a key the app still runs end to end — every check safely returns
+> `UNCERTAIN` with a note, demonstrating principle #1.
 
----
+```bash
+npm run dev     # http://localhost:3000
+# or
+npm run build && npm start
+```
 
-## PASS · FAIL · UNCERTAIN
+## Demo script (2–3 min)
 
-For individual checks:
+1. **Dashboard** — the pitch and live counts.
+2. **Prep Manager** → *Load sample product* (Silicone Phone Case) → add photos
+   of a correctly prepped unit → **Run inspection** → walk the checks table:
+   each line has the observed evidence, the photo, the confidence and the exact
+   rule quote. Overall **PASS**.
+3. A unit with the **FNSKU across a seam** → overall **FAIL**, naming the photo
+   and location.
+4. A **blurry** photo → **UNCERTAIN** with "re-photograph" guidance — "we don't
+   guess."
+5. **Not-verifiable panel** — bag thickness is shown as `NOT VERIFIABLE`.
+6. **Evidence Log → a record** — photo SHA-256 fingerprints, raw AI response,
+   timestamp, download. "Tamper-evident proof."
+7. **Recovery Manager** → *Load sample fee report* → **Match & classify**. The
+   packaging-defect fee for `PC-IP15-BLK` is **CONTRADICTED** by your Prep record
+   (a claim is prepared); a duplicate is caught; an already-reimbursed fee and an
+   unmatched SKU are **SILENT**. "Defensible claims, not maximum claims."
 
-* **PASS** — the evidence supports the condition.
-* **FAIL** — the evidence shows the condition is not met.
-* **UNCERTAIN** — the evidence is insufficient for a reliable judgment.
+## Test scenarios (§1.9)
 
-`UNCERTAIN` is not simply a low-confidence PASS.
+The 10 scenarios map directly to outcomes: correct prep → `PASS`; missing /
+hidden warning, bad FNSKU placement, FNSKU across a seam, visible original
+barcode, covered expiry, missing handling mark → `FAIL`; blurry / ambiguous →
+`UNCERTAIN` with retake guidance. Because the rules are deterministic, the same
+photos always produce the same result.
 
----
+## The platform — one evidence chain
 
-*CUBE Buildathon · Commerce Context*
+Every Manager writes the **same `EvidenceRecord`** shape
+([`src/lib/types.ts`](src/lib/types.ts)). That is what turns five tools into one
+system.
+
+| Manager | Question | Decision | Status |
+|---|---|---|---|
+| **Prep** | Was this unit prepped to standard? | PASS / FAIL / UNCERTAIN | **complete** |
+| **Recovery** | Does our evidence contradict this fee? | CONTRADICTED / SUPPORTED / SILENT / DUPLICATE / ALREADY REIMBURSED | built |
+| **Pack** | Does the box contain exactly what was ordered? | SEAL / STOP & FIX / UNCERTAIN | planned |
+| **Receiving** | Did we receive what we ordered, undamaged? | ACCEPT / EXCEPTION / UNCERTAIN | planned |
+| **Returns** | What came back, what condition, what next? | RESTOCK / REFURBISH / LIQUIDATE / DISPOSE / UNCERTAIN | planned |
+
+## Project map
+
+```
+src/
+  app/
+    page.tsx                     Dashboard
+    prep/page.tsx                Prep Manager (inspect UI)
+    evidence/page.tsx            Evidence Log (search)
+    evidence/[id]/page.tsx       Record detail (fingerprints, raw AI, export)
+    recovery/page.tsx            Recovery Manager
+    pack|receiving|returns/      Planned managers
+    api/
+      inspect/                   POST → observe + decide + save
+      records/ ...               list / get / export / photo bytes
+      recovery/                  POST → classify charges
+  lib/
+    types.ts                     shared EvidenceRecord shape
+    prepRequirements.ts          the rulebook (clauses + quotes) + sample products
+    vision.ts                    Claude observation step (no verdicts)
+    rules.ts                     deterministic decision engine
+    store.ts                     file-backed evidence store + SHA-256
+    recovery.ts                  fee matching + classification + sample report
+data/                            runtime records.json + photos/ (git-ignored)
+```
+
+## Notes
+
+- The rulebook quotes model standard marketplace (FBA-style) prep requirements
+  so every check is traceable. Replace the `quote` / `clause` strings in
+  `prepRequirements.ts` with the official challenge document verbatim — nothing
+  else changes, because the rules engine only ever reads from there.
+- Out of scope (per the brief): user accounts, multiple warehouses, live camera,
+  mobile apps, measuring physical properties, training custom models.

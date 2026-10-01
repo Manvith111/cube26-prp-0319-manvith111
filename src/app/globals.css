@@ -1,0 +1,373 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   OpsConsole design tokens — neon-lime brand, dark + light.
+   Existing pages read --bg/--panel/--panel-2/--border/--text/
+   --muted/--accent, so redefining them here re-skins the whole app.
+   ============================================================ */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #08090c;
+  --bg-2: #0b0d11;
+  --panel: #14161d;
+  --panel-2: #0f1116;
+  --panel-3: #1a1d26;
+  --border: #242734;
+  --border-soft: #1c1f2a;
+  --text: #f3f5f8;
+  --muted: #8b90a0;
+
+  --accent: #c6f24e; /* neon lime — fills, tints, rings, glows */
+  --accent-strong: #b4e62f;
+  --accent-ink: #0a140b; /* text on accent surfaces */
+  --link: #cdf65a; /* readable accent-coloured text */
+
+  --grad-1: #a78bfa; /* violet */
+  --grad-2: #38bdf8; /* sky    */
+  --grad-3: #f472b6; /* pink   */
+  --grad-4: #c6f24e; /* lime   */
+
+  --glow: rgba(198, 242, 78, 0.45);
+  --shadow: 0 18px 50px -24px rgba(0, 0, 0, 0.9);
+  --shadow-glow: 0 0 0 1px rgba(198, 242, 78, 0.18), 0 22px 60px -30px rgba(198, 242, 78, 0.35);
+  --radius: 18px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f6f0;
+  --bg-2: #eef1e8;
+  --panel: #ffffff;
+  --panel-2: #f3f5ee;
+  --panel-3: #e9ece1;
+  --border: #e0e3d8;
+  --border-soft: #e9ebe2;
+  --text: #11140f;
+  --muted: #5c6270;
+
+  --accent: #a6e22e; /* bright lime that still reads on white */
+  --accent-strong: #8fd119;
+  --accent-ink: #14210a;
+  --link: #4d7c0f; /* deep green — readable link text on white */
+
+  --grad-1: #7c3aed;
+  --grad-2: #0284c7;
+  --grad-3: #db2777;
+  --grad-4: #65a30d;
+
+  --glow: rgba(132, 204, 22, 0.35);
+  --shadow: 0 18px 44px -26px rgba(30, 41, 20, 0.35);
+  --shadow-glow: 0 0 0 1px rgba(132, 204, 22, 0.22), 0 20px 50px -30px rgba(132, 204, 22, 0.4);
+  --radius: 18px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.4s ease, color 0.3s ease;
+  position: relative;
+  min-height: 100vh;
+}
+
+/* Ambient aurora background — soft brand-coloured blobs. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(42rem 42rem at 85% -10%, color-mix(in oklab, var(--grad-1) 20%, transparent), transparent 60%),
+    radial-gradient(38rem 38rem at -10% 20%, color-mix(in oklab, var(--grad-2) 16%, transparent), transparent 60%),
+    radial-gradient(46rem 46rem at 60% 115%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 60%);
+  opacity: 0.9;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+code,
+.font-mono,
+pre {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-strong);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ============================================================
+   Reusable component classes
+   ============================================================ */
+
+.surface-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.25s ease,
+    border-color 0.25s ease;
+  box-shadow: var(--shadow);
+}
+.surface-card.hover-lift:hover {
+  transform: translateY(-4px);
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+  box-shadow: var(--shadow-glow);
+}
+
+.btn-accent {
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--accent-ink);
+  border-radius: 999px;
+  font-weight: 700;
+  transition: transform 0.18s ease, box-shadow 0.25s ease, filter 0.2s ease;
+  box-shadow: 0 10px 30px -12px var(--glow);
+}
+.btn-accent:hover:not(:disabled) {
+  transform: translateY(-2px);
+  filter: brightness(1.05);
+  box-shadow: 0 16px 40px -12px var(--glow);
+}
+.btn-accent:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-ghost {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--panel) 70%, transparent);
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.18s ease;
+}
+.btn-ghost:hover {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--border));
+  background: color-mix(in oklab, var(--accent) 10%, var(--panel));
+  transform: translateY(-1px);
+}
+
+.gradient-text {
+  background: linear-gradient(100deg, var(--grad-2), var(--grad-1), var(--grad-3), var(--accent));
+  background-size: 250% 250%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: gradient-shift 8s ease infinite;
+}
+
+/* Hollow outline display text, like the reference hero. */
+.outline-text {
+  color: transparent;
+  -webkit-text-stroke: 2px var(--text);
+  letter-spacing: -0.02em;
+  opacity: 0.92;
+}
+
+.ring-dot {
+  position: relative;
+}
+.ring-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 30%, transparent);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.chip {
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--panel) 60%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+/* Animated conic border — the "racetrack glow" from the reference. */
+.glow-border {
+  position: relative;
+  border-radius: var(--radius);
+  background: var(--panel);
+  isolation: isolate;
+}
+.glow-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--angle, 0deg),
+    var(--grad-2),
+    var(--grad-1),
+    var(--grad-3),
+    var(--accent),
+    var(--grad-2)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: spin-angle 6s linear infinite;
+  z-index: -1;
+}
+
+/* ============================================================
+   Keyframes + animation utilities
+   ============================================================ */
+
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes spin-angle {
+  to {
+    --angle: 360deg;
+  }
+}
+
+@keyframes gradient-shift {
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.25;
+    transform: scale(1.35);
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.animate-fade-in {
+  animation: fade-in 0.8s ease both;
+}
+.animate-float {
+  animation: float 5s ease-in-out infinite;
+}
+
+.delay-1 {
+  animation-delay: 0.08s;
+}
+.delay-2 {
+  animation-delay: 0.16s;
+}
+.delay-3 {
+  animation-delay: 0.24s;
+}
+.delay-4 {
+  animation-delay: 0.32s;
+}
+.delay-5 {
+  animation-delay: 0.4s;
+}
+
+/* Count-up / shimmer loading bar */
+.shimmer-bar {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--accent) 30%, transparent),
+    transparent
+  );
+  animation: shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
