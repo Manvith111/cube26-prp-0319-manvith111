@@ -1,0 +1,46 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "opsconsole",
+	"main": ".open-next/worker.js",
+	"compatibility_date": "2026-10-01",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"assets": {
+		"directory": ".open-next/assets",
+		"binding": "ASSETS"
+	},
+	"observability": {
+		"enabled": true
+	},
+	// D1 — catalog + evidence records + job state. See migrations/0001_init.sql.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "opsconsole-db",
+			"database_id": "7971ff80-0535-442e-ade7-199cd7810dc4",
+			"migrations_dir": "migrations"
+		}
+	],
+	// R2 — inspection photos (zero-egress object storage). The bucket is created
+	// once R2 is enabled for the account (dashboard one-time step), then:
+	//   wrangler r2 bucket create opsconsole-photos
+	"r2_buckets": [
+		{
+			"binding": "PHOTOS",
+			"bucket_name": "opsconsole-photos"
+		},
+		{
+			"bucket_name": "opsconsole-photos",
+			"binding": "opsconsole_photos",
+			"remote": true
+		}
+	],
+	// KV — per-station / per-org config (e.g. encrypted API keys later).
+	"kv_namespaces": [
+		{
+			"binding": "CONFIG",
+			"id": "bf40cf94b0c54beabedda2a03b920aa4"
+		}
+	]
+}

@@ -1,4 +1,4 @@
-// Shared type definitions for OpsConsole.
+// Shared type definitions for Pancha Pandava.
 // The same EvidenceRecord shape is the "one evidence chain" every Manager writes.
 
 export type Verdict =
@@ -35,6 +35,17 @@ export interface ProductInput {
   isFragile: boolean;
   requiredHandlingMarks: string[];
   coverOriginalBarcode: boolean;
+}
+
+// A catalog row: a product's criteria plus the rule pack it is judged against.
+// Looked up by SKU, by its expected FNSKU, or by a manufacturer barcode (UPC/EAN).
+export interface CatalogEntry {
+  sku: string; // primary key (mirrors product.sku)
+  product: ProductInput;
+  rulePackId: string;
+  rulePackVersion: string;
+  upc?: string; // manufacturer barcode, for auto-ID by scan
+  updatedAt: string; // ISO-8601
 }
 
 export interface PhotoMeta {
@@ -110,6 +121,13 @@ export interface EvidenceRecord {
   shipmentId?: string;
   unitId?: string;
   notes?: string;
+  // Tenancy (optional for backward-compat; the D1 schema carries the same columns).
+  orgId?: string;
+  warehouseId?: string;
+  stationId?: string;
+  operatorId?: string;
+  // The rule pack this record was judged against (cited for traceability).
+  rulePack?: { id: string; version: string; source: string };
   photos: PhotoMeta[];
   checks: CheckResult[];
   overall: OverallResult;

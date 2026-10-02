@@ -4,8 +4,11 @@
     {
       "name": "opsconsole",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "-p", "3005"],
-      "port": 3005
+      "runtimeArgs": ["run", "dev"],
+      "autoPort": true,
+      "env": {
+        "NEXT_DIST_DIR": ".next-session"
+      }
     }
   ]
 }

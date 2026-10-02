@@ -5,7 +5,7 @@
 // cited evidence) and turns them into PASS / FAIL / UNCERTAIN / NOT_VERIFIABLE
 // / NOT_APPLICABLE using fixed logic. Same observations in → same verdicts out.
 
-import { CHECK_CATALOG, RULE_CLAUSES } from "./prepRequirements";
+import type { RulePack } from "./rulePacks";
 import type {
   CheckResult,
   Confidence,
@@ -49,6 +49,7 @@ function uncertain(
 export function evaluate(
   product: ProductInput,
   vision: VisionResult,
+  pack: RulePack,
 ): { checks: CheckResult[]; overall: OverallResult } {
   const usableByIndex = new Map<number, boolean>();
   for (const q of vision.photoQuality) usableByIndex.set(q.photoIndex, q.usable);
@@ -58,8 +59,8 @@ export function evaluate(
 
   const checks: CheckResult[] = [];
 
-  for (const def of CHECK_CATALOG) {
-    const clause = RULE_CLAUSES[def.clauseKey];
+  for (const def of pack.checks) {
+    const clause = pack.clauses[def.clauseKey];
     const applicable = def.appliesTo(product);
     const base: CheckBase = {
       checkId: def.id,

@@ -5,10 +5,14 @@
 // confidence, which photo + where, the visible evidence, a usability rating
 // per photo, and a literal transcription of the FNSKU label. The deterministic
 // rules engine (rules.ts) turns these observations into verdicts.
+//
+// The set of checks and their rule quotes come from the RulePack passed in, so
+// the same observation code serves any marketplace rulebook.
 
 import { z } from "zod";
-import { CHECK_CATALOG, RULE_CLAUSES } from "./prepRequirements";
 import { getGeminiApiKey, getVisionModel } from "./settings";
+import type { CheckDef } from "./prepRequirements";
+import type { RulePack } from "./rulePacks";
 import type { CheckId, ProductInput, VisionResult } from "./types";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -64,20 +68,18 @@ export interface PhotoInput {
   dataBase64: string;
 }
 
-const KNOWN_CHECK_IDS = new Set(CHECK_CATALOG.map((c) => c.id));
-
-function applicableObservable(product: ProductInput) {
+function applicableObservable(product: ProductInput, pack: RulePack): CheckDef[] {
   // Checks the AI should observe: verifiable, apply to the product, and not
   // the derived text-match check (that comes from label_text_read).
-  return CHECK_CATALOG.filter(
+  return pack.checks.filter(
     (c) => c.verifiable && c.id !== "fnsku_text_match" && c.appliesTo(product),
   );
 }
 
-function buildPrompt(product: ProductInput): { system: string; userText: string } {
-  const checks = applicableObservable(product);
+function buildPrompt(product: ProductInput, pack: RulePack): { system: string; userText: string } {
+  const checks = applicableObservable(product, pack);
   const checklist = checks
-    .map((c) => `  - "${c.id}" — ${c.name}. Rule: ${RULE_CLAUSES[c.clauseKey].quote}`)
+    .map((c) => `  - "${c.id}" — ${c.name}. Rule: ${pack.clauses[c.clauseKey].quote}`)
     .join("\n");
 
   const system = [
@@ -124,7 +126,7 @@ function buildPrompt(product: ProductInput): { system: string; userText: string 
   return { system, userText };
 }
 
-function extractJson(text: string): unknown {
+export function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced ? fenced[1] : text;
   const start = candidate.indexOf("{");
@@ -138,12 +140,13 @@ function emptyResult(
   photos: PhotoInput[],
   model: string,
   note: string,
+  pack: RulePack,
   raw = "",
 ): VisionResult {
   return {
     photoQuality: photos.map((p) => ({ photoIndex: p.index, usable: false, issues: ["observation_unavailable"] })),
     labelRead: { value: null, photoIndex: null, legible: false, confidence: "low" },
-    observations: applicableObservable(product).map((c) => ({
+    observations: applicableObservable(product, pack).map((c) => ({
       checkId: c.id,
       status: "cant_tell" as const,
       confidence: "low" as const,
@@ -167,7 +170,7 @@ interface GeminiResponse {
   error?: { message?: string; status?: string };
 }
 
-async function callGemini(
+export async function callGemini(
   apiKey: string,
   model: string,
   system: string,
@@ -216,9 +219,13 @@ async function callGemini(
   return text;
 }
 
-export async function observe(product: ProductInput, photos: PhotoInput[]): Promise<VisionResult> {
+export async function observe(
+  product: ProductInput,
+  photos: PhotoInput[],
+  pack: RulePack,
+): Promise<VisionResult> {
   const model = getVisionModel();
-  if (photos.length === 0) return emptyResult(product, photos, model, "No photos were provided.");
+  if (photos.length === 0) return emptyResult(product, photos, model, "No photos were provided.", pack);
 
   const apiKey = getGeminiApiKey();
   if (!apiKey) {
@@ -227,10 +234,12 @@ export async function observe(product: ProductInput, photos: PhotoInput[]): Prom
       photos,
       model,
       "AI vision unavailable: no Gemini API key configured. Add one on the Settings page (or set GEMINI_API_KEY).",
+      pack,
     );
   }
 
-  const { system, userText } = buildPrompt(product);
+  const { system, userText } = buildPrompt(product, pack);
+  const knownCheckIds = new Set<string>(pack.checks.map((c) => c.id));
 
   // Try the chosen model, then (only on a transient/capacity error) the fallback.
   const candidates = model === FALLBACK_MODEL ? [model] : [model, FALLBACK_MODEL];
@@ -242,21 +251,26 @@ export async function observe(product: ProductInput, photos: PhotoInput[]): Prom
       try {
         raw = await callGemini(apiKey, candidate, system, userText, photos);
         const parsed = visionSchema.parse(extractJson(raw));
-        return mapResult(parsed, candidate, raw);
+        return mapResult(parsed, candidate, raw, knownCheckIds);
       } catch (e) {
         lastError = describe(e);
         // Auth/permission/safety errors fail on every model — stop immediately.
         if (failsEverywhere(lastError)) {
-          return emptyResult(product, photos, model, `AI observation failed: ${lastError}`, raw);
+          return emptyResult(product, photos, model, `AI observation failed: ${lastError}`, pack, raw);
         }
         // Otherwise retry once on this model, then fall through to the fallback.
       }
     }
   }
-  return emptyResult(product, photos, model, `AI observation failed: ${lastError}`, raw);
+  return emptyResult(product, photos, model, `AI observation failed: ${lastError}`, pack, raw);
 }
 
-function mapResult(v: z.infer<typeof visionSchema>, model: string, raw: string): VisionResult {
+function mapResult(
+  v: z.infer<typeof visionSchema>,
+  model: string,
+  raw: string,
+  knownCheckIds: Set<string>,
+): VisionResult {
   return {
     photoQuality: v.photo_quality.map((q) => ({
       photoIndex: q.photo_index,
@@ -270,7 +284,7 @@ function mapResult(v: z.infer<typeof visionSchema>, model: string, raw: string):
       confidence: v.label_text_read.confidence,
     },
     observations: v.observations
-      .filter((o) => KNOWN_CHECK_IDS.has(o.check_id as CheckId))
+      .filter((o) => knownCheckIds.has(o.check_id))
       .map((o) => ({
         checkId: o.check_id as CheckId,
         status: o.status,

@@ -4,10 +4,11 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import type { EvidenceRecord } from "./types";
+import type { CatalogEntry, EvidenceRecord } from "./types";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const RECORDS_FILE = path.join(DATA_DIR, "records.json");
+const CATALOG_FILE = path.join(DATA_DIR, "catalog.json");
 const PHOTOS_DIR = path.join(DATA_DIR, "photos");
 
 function ensureDirs(): void {
@@ -77,4 +78,51 @@ export function readPhoto(storedPath: string): Buffer | null {
   if (!abs.startsWith(path.resolve(DATA_DIR))) return null;
   if (!fs.existsSync(abs)) return null;
   return fs.readFileSync(abs);
+}
+
+// ---- Catalog (product list + per-SKU criteria) ----
+
+export function normalizeCode(s: string): string {
+  return s.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+export function readCatalog(): CatalogEntry[] {
+  ensureDirs();
+  if (!fs.existsSync(CATALOG_FILE)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(CATALOG_FILE, "utf8")) as CatalogEntry[];
+  } catch {
+    return [];
+  }
+}
+
+function writeCatalog(entries: CatalogEntry[]): void {
+  ensureDirs();
+  fs.writeFileSync(CATALOG_FILE, JSON.stringify(entries, null, 2));
+}
+
+/** Upsert rows by SKU; returns the number of rows written. */
+export function upsertCatalog(entries: CatalogEntry[]): number {
+  const bySku = new Map(readCatalog().map((e) => [e.sku, e]));
+  for (const e of entries) bySku.set(e.sku, e);
+  writeCatalog([...bySku.values()]);
+  return entries.length;
+}
+
+export function getCatalogBySku(sku: string): CatalogEntry | null {
+  return readCatalog().find((e) => e.sku === sku) ?? null;
+}
+
+/** Match a scanned/typed code against SKU, expected FNSKU, or manufacturer UPC. */
+export function findCatalogByCode(code: string): CatalogEntry | null {
+  const norm = normalizeCode(code);
+  if (!norm) return null;
+  return (
+    readCatalog().find(
+      (e) =>
+        normalizeCode(e.sku) === norm ||
+        normalizeCode(e.product.expectedFnsku) === norm ||
+        (e.upc ? normalizeCode(e.upc) === norm : false),
+    ) ?? null
+  );
 }

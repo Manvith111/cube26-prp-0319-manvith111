@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpsConsole Prep — Test Image Kit</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, Arial, sans-serif; background: #1b1e24; color: #e8eaed; }
+  header.page { padding: 20px 24px; }
+  header.page h1 { margin: 0 0 4px; font-size: 20px; }
+  header.page p { margin: 0; color: #9aa2ad; font-size: 13px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 18px; padding: 0 24px 40px; }
+  .item { width: 420px; }
+  .item .bar { display: flex; align-items: center; justify-content: space-between; padding: 8px 2px; }
+  .item .bar .sku { font: 600 12px/1 ui-monospace, monospace; color: #cdd3db; }
+  .item .bar button { background: #3b82f6; color: #fff; border: 0; border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+
+  .photo { position: relative; width: 420px; height: 300px; border-radius: 10px; overflow: hidden;
+           background: linear-gradient(135deg, #d8cab0, #b9a888 60%, #a7977a); }
+  .photo.full { width: 900px; height: 600px; border-radius: 0; }
+  .photo .unit { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+
+  .box { position: relative; width: 70%; height: 72%; background: #fafafa; border-radius: 8px;
+         box-shadow: 0 18px 40px rgba(0,0,0,.35); padding: 14px; color: #111; }
+  .photo.full .box { padding: 26px; }
+  .box h2 { margin: 0 0 6px; font-size: 13px; letter-spacing: .02em; }
+  .photo.full .box h2 { font-size: 22px; }
+  .muted { color: #555; font-size: 10px; }
+  .photo.full .muted { font-size: 16px; }
+
+  /* Decorative manufacturer UPC (not a real/scannable code — kept visual only). */
+  .barcode { height: 30px; background-image: repeating-linear-gradient(90deg,#111 0 2px,#fff 2px 4px,#111 4px 5px,#fff 5px 9px);
+             border-radius: 2px; }
+  .photo.full .barcode { height: 52px; }
+  .code { font: 700 11px/1.4 ui-monospace, monospace; letter-spacing: .08em; }
+  .photo.full .code { font-size: 20px; }
+
+  .fnsku { position: absolute; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 6px 8px;
+           box-shadow: 0 4px 10px rgba(0,0,0,.2); width: 48%; }
+  .fnsku .lbl { font: 700 8px/1 Arial; color: #333; margin-bottom: 3px; }
+  .photo.full .fnsku .lbl { font-size: 13px; }
+  canvas.bc { display: block; width: 100%; height: auto; }
+
+  .bag { position: absolute; inset: 6%; border-radius: 14px; pointer-events: none;
+         background: linear-gradient(115deg, rgba(255,255,255,.38), rgba(255,255,255,.05) 30%, rgba(255,255,255,.22) 55%, rgba(255,255,255,.04) 75%, rgba(255,255,255,.3));
+         border: 1px solid rgba(255,255,255,.5); box-shadow: inset 0 0 30px rgba(255,255,255,.25); }
+  .bag.open { clip-path: polygon(0 0,100% 0,100% 72%,60% 72%,55% 60%,45% 72%,0 72%); }
+  .bagtag { position: absolute; top: 4%; left: 50%; transform: translateX(-50%); font: 700 9px Arial; color: #0a6; }
+  .photo.full .bagtag { font-size: 15px; }
+
+  .warn { font: 600 7px/1.25 Arial; color: #a00; border: 1px solid #a00; border-radius: 3px; padding: 3px 4px; }
+  .photo.full .warn { font-size: 12px; }
+  .mark { position: absolute; font: 800 12px Arial; color: #b00; }
+  .photo.full .mark { font-size: 22px; }
+  .glare { position: absolute; inset: 0; background: radial-gradient(circle at 70% 30%, rgba(255,255,255,.85), transparent 45%); }
+  .expiry { font: 700 10px ui-monospace, monospace; color: #0a3; }
+  .photo.full .expiry { font-size: 18px; }
+  .stamp { position: absolute; top: 8px; right: 8px; background: #111; color: #fff; font: 700 8px Arial; padding: 2px 6px; border-radius: 4px; opacity: .8; }
+  .photo.full .stamp { font-size: 13px; }
+</style>
+</head>
+<body>
+<header class="page" id="hdr">
+  <h1>OpsConsole Prep — Test Image Kit</h1>
+  <p>Synthetic sample units (clearly marked <b>TEST</b>) with <b>real scannable Code-128 barcodes</b>. Click “Download PNG”, then on <b>/prep</b> just upload the image — it auto-IDs from the barcode. Add <code>?s=1..5</code> for a single full-size image.</p>
+</header>
+<div class="grid" id="grid"></div>
+
+<script>
+const SCENARIOS = [
+  { sku: "TEST-PASS-01", title: "Phone Case — compliant",
+    code: "X00PASS001", fnskuText: "X00PASS001",
+    opts: { bag: "sealed", warn: true, upc: "covered" } },
+  { sku: "TEST-FAIL-01", title: "Phone Case — non-compliant",
+    code: "X00FAIL010", fnskuText: "X00ZZZ999",
+    opts: { bag: "open", warn: false, upc: "visible" } },
+  { sku: "TEST-EXP-FRAGILE-01", title: "Supplement — expiry + fragile",
+    code: "X00EXP020", fnskuText: "X00EXP020",
+    opts: { bag: "sealed", warn: true, upc: "covered", expiry: "EXP 2027-03", marks: true } },
+  { sku: "TEST-UNCERTAIN-01", title: "Blurred / glare capture",
+    code: "X00UNC030", fnskuText: "X00UNC030",
+    opts: { bag: "sealed", warn: true, upc: "covered", blur: true } },
+  { sku: "TEST-NOPOLY-01", title: "Boxed item — no poly bag",
+    code: "X00BOX040", fnskuText: "X00BOX040",
+    opts: { bag: "none", warn: false, upc: "visible" } },
+];
+
+function unit(s) {
+  const o = s.opts;
+  const warn = o.warn
+    ? '<div class="warn">WARNING: To avoid danger of suffocation, keep this plastic bag away from babies and children. Do not use in cribs, beds, carriages or playpens.</div>'
+    : '<div class="muted">(no suffocation warning printed)</div>';
+  const expiry = o.expiry ? '<div class="expiry">'+o.expiry+' &nbsp; BEST BEFORE</div>' : '';
+  const marks = o.marks
+    ? '<span class="mark" style="top:6%;left:6%">&#9888; FRAGILE</span><span class="mark" style="bottom:8%;right:6%">&#8593; THIS WAY UP</span>'
+    : '';
+  const upc = (o.upc === "visible" || o.upc === "covered")
+    ? '<div style="margin-top:8px"><div class="muted">Manufacturer UPC</div><div class="barcode"></div><div class="code">0 12345 67890 5</div></div>'
+    : '';
+  const pos = o.upc === "covered" ? 'right:14px;bottom:14px' : 'right:14px;top:14px';
+  const fnlbl = o.upc === "covered" ? "FNSKU (over original barcode)" : "FNSKU";
+  const fnsku = '<div class="fnsku" style="'+pos+'"><div class="lbl">'+fnlbl+'</div>'
+    + '<canvas class="bc" data-code="'+s.code+'"></canvas>'
+    + '<div class="code">'+s.fnskuText+'</div></div>';
+  const bag = o.bag === "none" ? ''
+    : '<div class="bag '+(o.bag==="open"?"open":"")+'"></div><div class="bagtag">'+(o.bag==="open"?"POLY BAG — OPEN / UNSEALED":"POLY BAG — SEALED")+'</div>';
+  const glare = o.blur ? '<div class="glare"></div>' : '';
+  return '<div class="unit"><div class="box"><div class="stamp">TEST SAMPLE</div>'
+    + '<h2>'+s.title+'</h2>' + warn + expiry + upc + fnsku + '</div>' + marks + '</div>' + bag + glare;
+}
+
+function card(s, full) {
+  const photo = document.createElement("div");
+  photo.className = "photo" + (full ? " full" : "");
+  photo.innerHTML = unit(s);
+  if (s.opts.blur) photo.style.filter = "blur(5px)";
+  return photo;
+}
+
+function renderBarcodes(root, full) {
+  root.querySelectorAll("canvas.bc").forEach((c) => {
+    try {
+      JsBarcode(c, c.dataset.code, { format: "CODE128", displayValue: false, width: 2, height: full ? 64 : 32, margin: 0 });
+    } catch (e) { /* JsBarcode not ready */ }
+  });
+}
+
+const params = new URLSearchParams(location.search);
+const single = parseInt(params.get("s") || "", 10);
+
+function build() {
+  const grid = document.getElementById("grid");
+  if (single >= 1 && single <= SCENARIOS.length) {
+    document.getElementById("hdr").style.display = "none";
+    document.body.style.background = "#000";
+    grid.style.padding = "0"; grid.style.gap = "0";
+    const photo = card(SCENARIOS[single - 1], true);
+    grid.appendChild(photo);
+    renderBarcodes(photo, true);
+  } else {
+    SCENARIOS.forEach((s) => {
+      const item = document.createElement("div");
+      item.className = "item";
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      bar.innerHTML = '<span class="sku">' + s.sku + '</span>';
+      const btn = document.createElement("button");
+      btn.textContent = "Download PNG";
+      const photo = card(s, false);
+      btn.onclick = async () => {
+        const canvas = await html2canvas(photo, { scale: 2, backgroundColor: null });
+        const a = document.createElement("a");
+        a.download = s.sku + ".png";
+        a.href = canvas.toDataURL("image/png");
+        a.click();
+      };
+      bar.appendChild(btn);
+      item.appendChild(bar);
+      item.appendChild(photo);
+      grid.appendChild(item);
+      renderBarcodes(photo, false);
+    });
+  }
+}
+
+if (window.JsBarcode) build();
+else window.addEventListener("load", build);
+</script>
+</body>
+</html>

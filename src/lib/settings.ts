@@ -11,7 +11,9 @@ import path from "path";
 const DATA_DIR = path.join(process.cwd(), "data");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
-export const DEFAULT_VISION_MODEL = "gemini-flash-latest";
+// gemini-2.5-flash is the default: it's current and has usable free-tier quota.
+// (gemini-flash-latest aliases gemini-3.8-flash, whose free tier is tiny.)
+export const DEFAULT_VISION_MODEL = "gemini-2.5-flash";
 
 // Models the Settings page offers. Any string is accepted on save, but these
 // cover the common Gemini vision-capable choices.

@@ -7,6 +7,12 @@
 /.next/
 /out/
 
+# cloudflare / opennext build artifacts
+/.open-next/
+/.wrangler/
+/.next-session/
+cloudflare-env.d.ts
+
 # production
 /build
 

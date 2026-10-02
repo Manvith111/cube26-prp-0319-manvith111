@@ -3,7 +3,7 @@ import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
 
 export const metadata: Metadata = {
-  title: "OpsConsole — Prep Manager",
+  title: "Pancha Pandava — Prep Manager",
   description: "One platform, five AI Managers, one evidence chain.",
 };
 
@@ -25,7 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <div className="relative z-[1] flex min-h-screen">
           <Sidebar />
-          <main className="min-w-0 flex-1">{children}</main>
+          <main className="min-w-0 flex-1 pt-14 lg:pt-0">{children}</main>
         </div>
       </body>
     </html>

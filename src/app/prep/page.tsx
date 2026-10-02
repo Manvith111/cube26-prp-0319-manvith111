@@ -2,8 +2,10 @@
 
 import { useRef, useState } from "react";
 import { SAMPLE_PRODUCTS, emptyProduct, PREP_REQUIREMENTS_SOURCE } from "@/lib/prepRequirements";
-import type { CheckResult, EvidenceRecord, ProductInput } from "@/lib/types";
+import type { CatalogEntry, CheckResult, EvidenceRecord, ProductInput } from "@/lib/types";
 import { OverallBanner, VerdictBadge } from "@/components/VerdictBadge";
+import { detectBarcodeFromBlob } from "@/lib/client/barcode";
+import { findProductFromPhotos } from "@/lib/client/find";
 
 interface PhotoItem {
   id: string;
@@ -37,6 +39,10 @@ export default function PrepPage() {
   const [shipmentId, setShipmentId] = useState("");
   const [unitId, setUnitId] = useState("");
   const [notes, setNotes] = useState("");
+  const [rulePackId, setRulePackId] = useState("fba");
+  const [rulePackVersion, setRulePackVersion] = useState("1");
+  const [catalogCode, setCatalogCode] = useState("");
+  const [catalogMsg, setCatalogMsg] = useState<string | null>(null);
   const [photos, setPhotos] = useState<PhotoItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,29 +62,107 @@ export default function PrepPage() {
     setMarksText(s.requiredHandlingMarks.join(", "));
   }
 
-  async function onFiles(files: FileList | null) {
-    if (!files) return;
-    const items = await Promise.all(Array.from(files).map(fileToItem));
-    setPhotos((prev) => [...prev, ...items].slice(0, 6));
-    if (fileRef.current) fileRef.current.value = "";
+  // Apply a catalog row to the form. Announces the switch so it's obvious the
+  // product info changed (and from what) when a different unit is identified.
+  function applyCatalogEntry(entry: CatalogEntry, source: "photo" | "code") {
+    const prevSku = product.sku.trim();
+    setProduct({ ...entry.product });
+    setMarksText(entry.product.requiredHandlingMarks.join(", "));
+    setRulePackId(entry.rulePackId);
+    setRulePackVersion(entry.rulePackVersion);
+    setCatalogCode(entry.sku);
+    const pack = `rule pack ${entry.rulePackId}@${entry.rulePackVersion}`;
+    const how = source === "photo" ? "auto-detected from the photo" : "loaded";
+    if (prevSku && prevSku !== entry.sku) {
+      setCatalogMsg(`Product changed from ${prevSku} → ${entry.sku} · ${pack} (${how}).`);
+    } else {
+      setCatalogMsg(`${source === "photo" ? "Auto-detected" : "Loaded"} ${entry.sku} · ${pack}.`);
+    }
   }
 
-  async function run() {
+  async function findInCatalog() {
+    const code = catalogCode.trim();
+    if (!code) return;
+    setCatalogMsg("Looking up…");
+    try {
+      const res = await fetch(`/api/catalog?code=${encodeURIComponent(code)}`);
+      if (!res.ok) {
+        setCatalogMsg(res.status === 404 ? "No catalog match for that code." : `Lookup failed (${res.status})`);
+        return;
+      }
+      applyCatalogEntry((await res.json()) as CatalogEntry, "code");
+    } catch (e) {
+      setCatalogMsg(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function lookupByCode(code: string): Promise<CatalogEntry | null> {
+    try {
+      const res = await fetch(`/api/catalog?code=${encodeURIComponent(code)}`);
+      return res.ok ? ((await res.json()) as CatalogEntry) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function identifyAndRun(entry: CatalogEntry, pics: PhotoItem[]) {
+    applyCatalogEntry(entry, "photo");
+    await runInspectionFor(entry.product, entry.rulePackId, entry.rulePackVersion, pics);
+  }
+
+  // Identify the product from the uploaded image(s) and auto-run the inspection.
+  // 1) read the barcode locally; 2) if that fails, let the AI read the label.
+  async function autoIdentify(files: File[], pics: PhotoItem[]) {
+    setCatalogMsg("Reading barcode from the photo…");
+    for (const file of files) {
+      const code = await detectBarcodeFromBlob(file);
+      if (!code) continue;
+      const entry = await lookupByCode(code);
+      if (entry) return identifyAndRun(entry, pics);
+    }
+
+    setCatalogMsg("Barcode unclear — asking the AI to identify the product…");
+    const found = await findProductFromPhotos(pics.map((p) => ({ mediaType: p.mediaType, dataBase64: p.base64 })));
+    if (found.match) return identifyAndRun(found.match, pics);
+
+    if (!found.available) {
+      setCatalogMsg(`AI identification unavailable: ${found.note ?? "try again shortly."}`);
+    } else if (found.candidates.length > 0) {
+      setCatalogMsg(`No confident match. Closest: ${found.candidates.map((c) => c.sku).join(", ")} — pick one or use Find in catalog.`);
+    } else {
+      setCatalogMsg("Couldn’t identify the product from the photo — pick it manually or use Find in catalog.");
+    }
+  }
+
+  async function onFiles(files: FileList | null) {
+    if (!files) return;
+    const arr = Array.from(files);
+    const items = await Promise.all(arr.map(fileToItem));
+    const next = [...photos, ...items].slice(0, 6);
+    setPhotos(next);
+    if (fileRef.current) fileRef.current.value = "";
+    void autoIdentify(arr, next);
+  }
+
+  // Core submit. Takes the product + rule pack + photos explicitly so it can run
+  // immediately after an auto-ID without waiting for React state to settle.
+  async function runInspectionFor(prod: ProductInput, packId: string, packVer: string, pics: PhotoItem[]) {
+    if (pics.length === 0 || loading) return;
     setLoading(true);
     setError(null);
     setResult(null);
-    const marks = marksText.split(",").map((m) => m.trim()).filter(Boolean);
-    const payloadProduct = { ...product, requiredHandlingMarks: marks };
     try {
       const res = await fetch("/api/inspect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          product: payloadProduct,
-          photos: photos.map((p) => ({ filename: p.filename, mediaType: p.mediaType, dataBase64: p.base64 })),
+          product: prod,
+          photos: pics.map((p) => ({ filename: p.filename, mediaType: p.mediaType, dataBase64: p.base64 })),
           shipmentId,
           unitId,
           notes,
+          rulePackId: packId,
+          rulePackVersion: packVer,
         }),
       });
       if (!res.ok) {
@@ -93,6 +177,11 @@ export default function PrepPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function run() {
+    const marks = marksText.split(",").map((m) => m.trim()).filter(Boolean);
+    await runInspectionFor({ ...product, requiredHandlingMarks: marks }, rulePackId, rulePackVersion, photos);
   }
 
   const canRun = product.sku.trim().length > 0 && photos.length > 0 && !loading;
@@ -135,7 +224,23 @@ export default function PrepPage() {
               ))}
             </select>
           </label>
+          <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+            <input
+              value={catalogCode}
+              onChange={(e) => setCatalogCode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") findInCatalog();
+              }}
+              placeholder="SKU / FNSKU / UPC"
+              className="w-40 rounded-lg border border-[var(--border)] bg-[var(--panel-2)] px-2 py-1 text-xs text-[var(--text)] outline-none focus:ring-2 focus:ring-[color-mix(in_oklab,var(--accent)_55%,transparent)]"
+            />
+            <button onClick={findInCatalog} className="btn-ghost px-2.5 py-1 text-xs font-semibold text-[var(--text)]">
+              Find in catalog
+            </button>
+          </div>
         </div>
+
+        {catalogMsg ? <p className="mt-2 text-xs text-[var(--muted)]">{catalogMsg}</p> : null}
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <Field label="SKU" value={product.sku} onChange={(v) => update("sku", v)} placeholder="PC-IP15-BLK" />
