@@ -167,7 +167,35 @@ interface GeminiResponse {
     finishReason?: string;
   }[];
   promptFeedback?: { blockReason?: string };
-  error?: { message?: string; status?: string };
+  error?: {
+    message?: string;
+    status?: string;
+    details?: { "@type"?: string; retryDelay?: string }[];
+  };
+}
+
+// Free-tier RPM limits are hit easily, so a 429 is usually transient: wait the
+// delay the server suggests and retry a couple of times before giving up.
+// Kept modest so cumulative waits stay inside the API routes' maxDuration
+// (find = 60s, inspect = 120s): worst case ~2 waits x 15s = 30s.
+const QUOTA_MAX_RETRIES = 2;
+const QUOTA_MAX_WAIT_MS = 15_000; // never block a request longer than this per wait
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// Pull the suggested wait from a 429's RetryInfo ("5.6s" / "5623ms"); fall back
+// to exponential backoff when the server didn't say.
+function retryDelayMs(data: GeminiResponse, attempt: number): number {
+  const raw = data.error?.details?.find((d) => d.retryDelay)?.retryDelay;
+  if (raw) {
+    const m = /([\d.]+)\s*(ms|s)?/.exec(raw);
+    if (m) {
+      const n = parseFloat(m[1]);
+      const ms = m[2] === "ms" ? n : n * 1000;
+      return Math.min(Math.ceil(ms) + 250, QUOTA_MAX_WAIT_MS); // small cushion
+    }
+  }
+  return Math.min(1000 * 2 ** attempt, QUOTA_MAX_WAIT_MS);
 }
 
 export async function callGemini(
@@ -194,18 +222,26 @@ export async function callGemini(
     },
   };
 
-  const res = await fetch(`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-goog-api-key": apiKey },
-    body: JSON.stringify(body),
-  });
+  let data: GeminiResponse = {};
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-goog-api-key": apiKey },
+      body: JSON.stringify(body),
+    });
 
-  const data = (await res.json().catch(() => ({}))) as GeminiResponse;
+    data = (await res.json().catch(() => ({}))) as GeminiResponse;
+    if (res.ok) break;
 
-  if (!res.ok) {
+    const isQuota = res.status === 429 || data.error?.status === "RESOURCE_EXHAUSTED";
+    if (isQuota && attempt < QUOTA_MAX_RETRIES) {
+      await sleep(retryDelayMs(data, attempt));
+      continue;
+    }
     const msg = data?.error?.message || `HTTP ${res.status}`;
     throw new Error(`Gemini API error: ${msg}`);
   }
+
   if (data.promptFeedback?.blockReason) {
     throw new Error(`Gemini blocked the request: ${data.promptFeedback.blockReason}`);
   }
