@@ -24,12 +24,13 @@ them**. OpsConsole captures the proof at the moment of prep.
 
 1. **UNCERTAIN is a valid answer.** A blurry, cropped or glary photo yields
    `UNCERTAIN` with retake guidance — never a guess.
-2. **The AI observes; the rules decide.** Claude only *describes what it can
+2. **The AI observes; the rules decide.** Gemini only *describes what it can
    see* (`met` / `not_met` / `cant_tell` + confidence + which photo + where).
    A fixed, transparent rules engine turns those observations into the verdict,
    so the **same evidence always gives the same result**.
 3. **No invented rules.** Every check cites a specific clause and exact quote
-   from the prep requirements document ([`src/lib/prepRequirements.ts`](src/lib/prepRequirements.ts)).
+   from a versioned **rule pack** ([`src/lib/rulePacks/`](src/lib/rulePacks/),
+   default `fba@1`).
 4. **No invented evidence.** A verdict with no visible evidence becomes
    `UNCERTAIN`.
 5. **Honest about limits.** Physical properties (bag thickness / material) are
@@ -40,16 +41,19 @@ them**. OpsConsole captures the proof at the moment of prep.
 ## How it works (the pipeline)
 
 ```
-photos ──▶ vision.ts (Claude: OBSERVE only)      ──▶ observations JSON
+photos ──▶ vision.ts (Gemini: OBSERVE only)      ──▶ observations JSON
                                                       │
-product config + prepRequirements.ts (the rulebook)  ▼
+product config + rulePacks/ (the versioned rulebook) ▼
                           rules.ts (DECIDE, deterministic) ──▶ verdicts + overall
                                                       │
-                                     store.ts  ──▶ evidence record (JSON + hashed photos)
+                            repo/ (file or Cloudflare) ──▶ evidence record (JSON + hashed photos)
 ```
 
-- [`src/lib/vision.ts`](src/lib/vision.ts) — the only AI call. Claude returns
-  per-check observations, a usability rating per photo, and a literal
+- [`src/lib/inspection.ts`](src/lib/inspection.ts) — the engine every capture
+  path shares (manual upload, auto-capture): resolve rule pack → observe →
+  decide → persist.
+- [`src/lib/vision.ts`](src/lib/vision.ts) — the AI observation call. Gemini
+  returns per-check observations, a usability rating per photo, and a literal
   transcription of the FNSKU label. It **never** returns a verdict. Parsing is
   validated with Zod and retried once; on any failure it falls back to
   `available: false` and every check becomes `UNCERTAIN` (so a network/API
@@ -59,8 +63,9 @@ product config + prepRequirements.ts (the rulebook)  ▼
   mismatch → `FAIL`. Any required `FAIL` → overall `FAIL`; else any required
   `UNCERTAIN` → overall `UNCERTAIN (needs review)` with a retake list; else
   `PASS`.
-- [`src/lib/store.ts`](src/lib/store.ts) — file-backed store under `data/`.
-  Records survive a restart.
+- [`src/lib/repo/`](src/lib/repo/) — one `Repository` interface over two stores:
+  the local filesystem (`data/`, dev default) and Cloudflare (D1 + R2 + KV, prod).
+  The engine never knows which is active. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## The checks
 
@@ -80,6 +85,23 @@ product config + prepRequirements.ts (the rulebook)  ▼
 
 Each check applies only where the product needs it (`NOT_APPLICABLE` otherwise).
 
+## Capture, catalog & auto-ID
+
+Beyond manual photo upload on **/prep**, OpsConsole supports hands-free capture
+and automatic product identification:
+
+- **/catalog** — import product criteria (CSV/JSON) and browse them. Each row
+  carries the product's checks plus the rule pack it's judged against, and is
+  looked up by SKU, expected FNSKU, or a manufacturer barcode (UPC/EAN).
+- **/capture** — live auto-capture. Cheap, model-free gates run in the browser
+  (motion settle-detection → best-frame/quality selection → barcode read) so the
+  expensive Gemini call fires **once per settled unit**, never per frame.
+- **Find agent** (`/api/find`, [`src/lib/find.ts`](src/lib/find.ts)) — the AI
+  reads visible codes + name + brand + keywords and a deterministic scorer
+  matches the catalog across SKU / FNSKU / UPC / name / category, so a unit is
+  identified even when no barcode decodes. Identity resolution only; judging
+  still happens against the matched product's own criteria.
+
 ## Run it
 
 Requirements: Node 18+.
@@ -88,12 +110,13 @@ Requirements: Node 18+.
 npm install
 ```
 
-Set your Anthropic key so the vision step runs (copy `.env.example`):
+Set your Gemini key so the vision + find steps run (copy `.env.example` to
+`.env.local`) — or add it later on the in-app **Settings** page:
 
 ```bash
 # .env.local
-ANTHROPIC_API_KEY=sk-ant-...
-# optional — faster/cheaper demos: PREP_VISION_MODEL=claude-sonnet-5-5
+GEMINI_API_KEY=...        # Google AI Studio key (GOOGLE_API_KEY also accepted)
+# optional — override the model: PREP_VISION_MODEL=gemini-2.5-flash
 ```
 
 > Without a key the app still runs end to end — every check safely returns
@@ -103,6 +126,24 @@ ANTHROPIC_API_KEY=sk-ant-...
 npm run dev     # http://localhost:3000
 # or
 npm run build && npm start
+```
+
+Run the unit tests (deterministic rules + client capture gates):
+
+```bash
+npm test
+```
+
+### Deploy to Cloudflare (optional)
+
+OpsConsole also runs on Cloudflare Workers via OpenNext, with D1 (records +
+catalog), R2 (photos) and KV (config). See [`wrangler.jsonc`](wrangler.jsonc)
+and [ARCHITECTURE.md](ARCHITECTURE.md §5).
+
+```bash
+npm run d1:migrate        # apply migrations/ to the D1 database
+wrangler secret put GEMINI_API_KEY
+npm run deploy            # opennextjs-cloudflare build && deploy
 ```
 
 ## Demo script (2–3 min)
@@ -152,30 +193,45 @@ system.
 src/
   app/
     page.tsx                     Dashboard
-    prep/page.tsx                Prep Manager (inspect UI)
+    prep/page.tsx                Prep Manager (manual inspect UI)
+    capture/page.tsx             Live auto-capture (motion + quality + barcode)
+    catalog/page.tsx             Catalog import / browse
     evidence/page.tsx            Evidence Log (search)
     evidence/[id]/page.tsx       Record detail (fingerprints, raw AI, export)
     recovery/page.tsx            Recovery Manager
+    settings/page.tsx            Gemini key + model
     pack|receiving|returns/      Planned managers
     api/
       inspect/                   POST → observe + decide + save
+      find/                      POST → identify catalog product from photo(s)
+      catalog/ , catalog/import/ list / upsert / bulk import
       records/ ...               list / get / export / photo bytes
       recovery/                  POST → classify charges
+      settings/                  GET/POST → masked config
   lib/
-    types.ts                     shared EvidenceRecord shape
-    prepRequirements.ts          the rulebook (clauses + quotes) + sample products
-    vision.ts                    Claude observation step (no verdicts)
+    types.ts                     shared EvidenceRecord + CatalogEntry shapes
+    inspection.ts                the engine (observe → decide → persist)
+    vision.ts                    Gemini observation step (no verdicts)
+    find.ts                      find agent (AI read + deterministic scorer)
     rules.ts                     deterministic decision engine
-    store.ts                     file-backed evidence store + SHA-256
-    recovery.ts                  fee matching + classification + sample report
-data/                            runtime records.json + photos/ (git-ignored)
+    rulePacks/                   versioned rulebooks (clauses + quotes), default fba@1
+    settings.ts                  Gemini key + model (config.json / env)
+    store.ts                     file-backed store + SHA-256 (dev)
+    repo/                        Repository interface: file | Cloudflare (D1/R2)
+    client/                      browser capture gates (motion, frameQuality, barcode)
+    catalogImport.ts             catalog CSV/JSON parsing
+migrations/                      D1 schema (0001_init.sql)
+data/                            runtime records.json + catalog.json + photos/ (git-ignored)
 ```
 
 ## Notes
 
 - The rulebook quotes model standard marketplace (FBA-style) prep requirements
   so every check is traceable. Replace the `quote` / `clause` strings in
-  `prepRequirements.ts` with the official challenge document verbatim — nothing
-  else changes, because the rules engine only ever reads from there.
-- Out of scope (per the brief): user accounts, multiple warehouses, live camera,
-  mobile apps, measuring physical properties, training custom models.
+  [`src/lib/rulePacks/fba-v1.ts`](src/lib/rulePacks/fba-v1.ts) with the official
+  challenge document verbatim — nothing else changes, because the rules engine
+  only ever reads from the resolved rule pack.
+- **Limitations:** physical properties (bag thickness/material) can't be proven
+  from a photo and are reported as `NOT VERIFIABLE`, never `PASS`. Out of scope:
+  user accounts/auth, mobile apps, and training custom models. (Live camera
+  capture is now included via **/capture**.)
