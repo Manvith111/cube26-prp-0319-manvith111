@@ -45,8 +45,9 @@ inspection engine and API routes never know which one is active.
                                          │
                        ┌─────────────────┼──────────────────┐
                        ▼                 ▼                   ▼
-                  Google Gemini     data/ (Node)      D1 / R2 / KV (CF)
-                  (vision model)    records + photos  records + photos + config
+                  AI providers      data/ (Node)      D1 / R2 / KV (CF)
+                  Gemini/Claude/    records + photos  records + photos + config
+                  OpenAI (pool)
 ```
 
 ### Client-side capture pipeline (`/capture`)
@@ -112,26 +113,41 @@ Every `EvidenceRecord` ([`src/lib/types.ts`](src/lib/types.ts)) carries:
 
 ---
 
-## 3. AI model usage
+## 3. AI model usage (multi-provider)
 
-- **Provider / model:** Google **Gemini** (default `gemini-2.5-flash`;
-  configurable per deployment or from the Settings page — see
-  [`src/lib/settings.ts`](src/lib/settings.ts)). The key resolves from
-  `data/config.json` first, then `GEMINI_API_KEY` / `GOOGLE_API_KEY`.
+The AI layer ([`src/lib/ai/`](src/lib/ai/)) is provider-agnostic. A **credential**
+is one `(provider, apiKey, model)` entry; many can be configured at once — several
+keys for one provider and/or several providers.
+
+- **Providers** ([`ai/providers/`](src/lib/ai/providers/)): **Gemini**,
+  **Anthropic (Claude)**, **OpenAI**. Each implements a small `ProviderDef`
+  (`generate` + `test`) and is listed in [`ai/registry.ts`](src/lib/ai/registry.ts).
+  Adding a provider is one file + one registry line.
+- **Credential pool & failover** ([`ai/index.ts`](src/lib/ai/index.ts)):
+  `callAi()` tries the enabled credentials **in order**. A key that is
+  quota-limited (429 / `RESOURCE_EXHAUSTED`), unauthorized, or erroring is
+  skipped and the next is tried immediately — so multiple keys/providers act as
+  one pool and dodge per-key rate limits. Only if **every** credential is
+  quota-limited does it wait once (honoring the server's suggested `Retry-After`,
+  capped) and retry the whole pool. A content-block error stops early (it would
+  repeat everywhere).
+- **Where credentials come from** ([`src/lib/settings.ts`](src/lib/settings.ts)):
+  `data/config.json` (managed on the **Settings** page) plus any seeded from env
+  vars (`GEMINI_API_KEY`/`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  with optional `<PROVIDER>_MODEL`). A legacy single-key config is migrated into a
+  credential automatically.
 - **Two observe-only calls, never a judge:**
-  - [`vision.observe()`](src/lib/vision.ts) — per-check visual observations for
-    an inspection.
+  - [`vision.observe()`](src/lib/vision.ts) — per-check visual observations.
   - [`find.findProduct()`](src/lib/find.ts) — read codes/text to identify which
     catalog product a photo shows.
-- **Structured, validated output:** both calls demand a single JSON object,
-  which is extracted (`extractJson`) and validated with **Zod**. On a parse
-  failure `observe` retries once, then falls back to `available: false` so a
-  network/quota/key problem degrades to `UNCERTAIN` for every check instead of
-  crashing or guessing.
+- **Structured, validated output:** every provider is asked for a single JSON
+  object (Gemini `responseMimeType`, OpenAI `json_object`, Claude by instruction);
+  the text is extracted (`extractJson`) and validated with **Zod**. Any failure
+  degrades to `available: false` → `UNCERTAIN` for every check, never a crash or
+  a guess.
 - **Guardrails in the prompt:** "report only what you can actually see, codes
-  character for character, never guess or invent." Physical properties that a
-  photo cannot prove (e.g. bag thickness) are modelled as `NOT_VERIFIABLE`, not
-  `PASS`.
+  character for character, never guess or invent." Physical properties a photo
+  cannot prove (e.g. bag thickness) are modelled as `NOT_VERIFIABLE`, not `PASS`.
 
 ---
 

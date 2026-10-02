@@ -1,37 +1,27 @@
 import { NextResponse } from "next/server";
-import { getConfigView, updateConfig, clearStoredKey, getGeminiApiKey } from "@/lib/settings";
+import {
+  getConfigView,
+  addCredential,
+  updateCredential,
+  removeCredential,
+  getCredentialKey,
+} from "@/lib/settings";
+import { PROVIDERS, isProviderId } from "@/lib/ai/registry";
 
 export const runtime = "nodejs";
-
-// A lightweight connectivity check: list models with the given key.
-async function testKey(apiKey: string): Promise<{ ok: boolean; message: string }> {
-  if (!apiKey.trim()) return { ok: false, message: "No API key to test." };
-  try {
-    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
-      headers: { "X-goog-api-key": apiKey.trim() },
-    });
-    const data = (await res.json().catch(() => ({}))) as {
-      error?: { message?: string };
-      models?: unknown[];
-    };
-    if (!res.ok) {
-      return { ok: false, message: data?.error?.message || `HTTP ${res.status}` };
-    }
-    const count = Array.isArray(data.models) ? data.models.length : 0;
-    return { ok: true, message: `Key is valid — ${count} models available.` };
-  } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : String(e) };
-  }
-}
 
 export async function GET() {
   return NextResponse.json(getConfigView());
 }
 
 interface SettingsBody {
-  action?: "save" | "test" | "clear";
-  geminiApiKey?: string;
-  visionModel?: string;
+  action?: "add" | "update" | "remove" | "test";
+  id?: string;
+  provider?: string;
+  apiKey?: string;
+  model?: string;
+  label?: string;
+  enabled?: boolean;
 }
 
 export async function POST(req: Request) {
@@ -42,23 +32,45 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const action = body.action ?? "save";
+  try {
+    switch (body.action) {
+      case "add":
+        return NextResponse.json(addCredential({
+          provider: body.provider ?? "",
+          apiKey: body.apiKey ?? "",
+          model: body.model,
+          label: body.label,
+        }));
 
-  if (action === "test") {
-    // Test the typed key if provided, otherwise fall back to the stored/env key.
-    const keyToTest = (body.geminiApiKey ?? "").trim() || getGeminiApiKey();
-    const result = await testKey(keyToTest);
-    return NextResponse.json(result, { status: result.ok ? 200 : 400 });
+      case "update":
+        if (!body.id) return NextResponse.json({ error: "id is required" }, { status: 400 });
+        return NextResponse.json(updateCredential(body.id, {
+          model: body.model,
+          label: body.label,
+          apiKey: body.apiKey,
+          enabled: body.enabled,
+        }));
+
+      case "remove":
+        if (!body.id) return NextResponse.json({ error: "id is required" }, { status: 400 });
+        return NextResponse.json(removeCredential(body.id));
+
+      case "test": {
+        if (!isProviderId(body.provider ?? "")) {
+          return NextResponse.json({ ok: false, message: "A valid provider is required." }, { status: 400 });
+        }
+        const provider = PROVIDERS[body.provider as "gemini" | "anthropic" | "openai"];
+        // Test the typed key if given, else the stored key for this credential id.
+        const key = (body.apiKey ?? "").trim() || (body.id ? getCredentialKey(body.id) ?? "" : "");
+        const model = (body.model ?? "").trim() || provider.defaultModel;
+        const result = await provider.test(key, model);
+        return NextResponse.json(result, { status: result.ok ? 200 : 400 });
+      }
+
+      default:
+        return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+    }
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
-
-  if (action === "clear") {
-    return NextResponse.json(clearStoredKey());
-  }
-
-  // save
-  const view = updateConfig({
-    geminiApiKey: body.geminiApiKey,
-    visionModel: body.visionModel,
-  });
-  return NextResponse.json(view);
 }

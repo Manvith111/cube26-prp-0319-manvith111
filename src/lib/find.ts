@@ -7,10 +7,10 @@
 // product's own criteria; this step only resolves identity.
 
 import { z } from "zod";
+import { callAi, NoCredentialsError } from "./ai";
 import { getRepository } from "./repo";
 import { normalizeCode } from "./store";
-import { getGeminiApiKey, getVisionModel } from "./settings";
-import { callGemini, extractJson, type PhotoInput } from "./vision";
+import { extractJson, type PhotoInput } from "./vision";
 import type { CatalogEntry } from "./types";
 
 const extractSchema = z.object({
@@ -75,9 +75,7 @@ function scoreEntry(entry: CatalogEntry, data: ExtractedDetails): number {
   return score;
 }
 
-async function extractDetails(photos: FindPhoto[]): Promise<ExtractedDetails> {
-  const apiKey = getGeminiApiKey();
-  const model = getVisionModel();
+async function extractDetails(photos: FindPhoto[]): Promise<{ data: ExtractedDetails; model: string }> {
   const system = [
     "You identify a product from photos so a warehouse system can look it up in its catalog.",
     "Report ONLY what you can actually see — codes read character for character, text as printed. Never guess or invent.",
@@ -96,24 +94,24 @@ async function extractDetails(photos: FindPhoto[]): Promise<ExtractedDetails> {
     mediaType: p.mediaType || "image/jpeg",
     dataBase64: p.dataBase64,
   }));
-  const raw = await callGemini(apiKey, model, system, userText, inPhotos);
-  return extractSchema.parse(extractJson(raw));
+  const result = await callAi(system, userText, inPhotos);
+  return { data: extractSchema.parse(extractJson(result.text)), model: `${result.provider}:${result.model}` };
 }
 
 export async function findProduct(photos: FindPhoto[]): Promise<FindResult> {
-  const model = getVisionModel();
-  if (!getGeminiApiKey()) {
-    return { match: null, candidates: [], extracted: null, available: false, note: "No Gemini API key configured.", model };
-  }
   if (photos.length === 0) {
-    return { match: null, candidates: [], extracted: null, available: false, note: "No photos provided.", model };
+    return { match: null, candidates: [], extracted: null, available: false, note: "No photos provided.", model: "none" };
   }
 
   let extracted: ExtractedDetails;
+  let model = "none";
   try {
-    extracted = await extractDetails(photos);
+    const out = await extractDetails(photos);
+    extracted = out.data;
+    model = out.model;
   } catch (e) {
-    return { match: null, candidates: [], extracted: null, available: false, note: e instanceof Error ? e.message : String(e), model };
+    const note = e instanceof NoCredentialsError ? "No AI provider configured." : e instanceof Error ? e.message : String(e);
+    return { match: null, candidates: [], extracted: null, available: false, note, model: "none" };
   }
 
   const catalog = await getRepository().listCatalog();

@@ -1,124 +1,214 @@
-// Server-side app configuration (API keys, model choice).
+// Server-side app configuration: the pool of AI provider credentials.
 //
-// Stored in data/config.json so it survives restarts and can be edited from the
-// Settings page. Values fall back to environment variables when the file is
-// absent, so either way of configuring the app works. This module is
-// server-only — never import it into a client component.
+// Many credentials can be configured at once — several keys for one provider
+// (to spread free-tier quota) and/or several providers (Gemini, Anthropic,
+// OpenAI). The orchestrator ([ai/index.ts]) tries them in order and fails over.
+//
+// Credentials are stored in data/config.json (git-ignored) and merged with any
+// seeded from environment variables. This module is server-only — never import
+// it into a client component.
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { PROVIDERS, PROVIDER_IDS, isProviderId } from "./ai/registry";
+import type { AiCredential, ProviderId } from "./ai/types";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
-// gemini-2.5-flash is the default: it's current and has usable free-tier quota.
-// (gemini-flash-latest aliases gemini-3.8-flash, whose free tier is tiny.)
-export const DEFAULT_VISION_MODEL = "gemini-2.5-flash";
-
-// Models the Settings page offers. Any string is accepted on save, but these
-// cover the common Gemini vision-capable choices.
-export const VISION_MODEL_OPTIONS = [
-  { id: "gemini-flash-latest", label: "Gemini Flash (latest) — fast, recommended" },
-  { id: "gemini-flash-lite-latest", label: "Gemini Flash-Lite (latest) — cheapest, most available" },
-  { id: "gemini-pro-latest", label: "Gemini Pro (latest) — most capable" },
-  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash — latest pinned flash" },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash — stable" },
-];
-
-export interface AppConfig {
-  geminiApiKey: string;
-  visionModel: string;
+interface StoredCredential {
+  id: string;
+  provider: ProviderId;
+  apiKey: string;
+  model: string;
+  label?: string;
+  enabled: boolean;
 }
 
-export type KeySource = "config" | "env" | "none";
+interface AppConfig {
+  credentials: StoredCredential[];
+  // Legacy single-key fields, tolerated on read and migrated on first write.
+  geminiApiKey?: string;
+  visionModel?: string;
+}
+
+export interface CredentialView {
+  id: string;
+  provider: ProviderId;
+  providerLabel: string;
+  model: string;
+  label?: string;
+  enabled: boolean;
+  maskedKey: string;
+  source: "config" | "env";
+}
 
 export interface ConfigView {
-  hasKey: boolean;
-  maskedKey: string;
-  keySource: KeySource;
-  model: string;
-  modelSource: "config" | "env" | "default";
+  credentials: CredentialView[];
+  providers: { id: ProviderId; label: string; defaultModel: string; models: { id: string; label: string }[]; keyHint: string }[];
+  hasAnyKey: boolean;
 }
 
 function ensureDir(): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function readFile(): Partial<AppConfig> {
+function readFile(): AppConfig {
   try {
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Partial<AppConfig>;
+    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Partial<AppConfig>;
+    return { credentials: Array.isArray(raw.credentials) ? raw.credentials : [], geminiApiKey: raw.geminiApiKey, visionModel: raw.visionModel };
   } catch {
-    return {};
+    return { credentials: [] };
   }
 }
 
-function writeFile(cfg: Partial<AppConfig>): void {
+function writeFile(cfg: AppConfig): void {
   ensureDir();
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
 }
 
-function envKey(): string {
-  return (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
+// Fold a legacy { geminiApiKey, visionModel } into the credentials list.
+function withLegacyMigrated(cfg: AppConfig): StoredCredential[] {
+  const creds = [...cfg.credentials];
+  const legacyKey = (cfg.geminiApiKey || "").trim();
+  if (legacyKey && !creds.some((c) => c.provider === "gemini" && c.apiKey === legacyKey)) {
+    creds.push({
+      id: "legacy-gemini",
+      provider: "gemini",
+      apiKey: legacyKey,
+      model: (cfg.visionModel || "").trim() || PROVIDERS.gemini.defaultModel,
+      label: "Gemini (migrated)",
+      enabled: true,
+    });
+  }
+  return creds;
 }
 
-/** The active Gemini API key: config file first, then environment. */
-export function getGeminiApiKey(): string {
-  const fromFile = (readFile().geminiApiKey || "").trim();
-  return fromFile || envKey();
+// Credentials seeded from environment variables (read-only in the UI).
+function envCredentials(existing: StoredCredential[]): AiCredential[] {
+  const out: AiCredential[] = [];
+  for (const id of PROVIDER_IDS) {
+    const provider = PROVIDERS[id];
+    for (const envVar of provider.envKeys) {
+      const key = (process.env[envVar] || "").trim();
+      if (!key) continue;
+      if (existing.some((c) => c.apiKey === key)) continue; // don't double-count
+      const modelEnv = (process.env[`${id.toUpperCase()}_MODEL`] || "").trim();
+      const geminiLegacyModel = id === "gemini" ? (process.env.PREP_VISION_MODEL || "").trim() : "";
+      out.push({
+        id: `env:${envVar}`,
+        provider: id,
+        apiKey: key,
+        model: modelEnv || geminiLegacyModel || provider.defaultModel,
+        label: `${provider.label} (env ${envVar})`,
+        enabled: true,
+        source: "env",
+      });
+    }
+  }
+  return out;
 }
 
-/** The active vision model: config file, then env, then the default. */
-export function getVisionModel(): string {
-  const fromFile = (readFile().visionModel || "").trim();
-  return fromFile || (process.env.PREP_VISION_MODEL || "").trim() || DEFAULT_VISION_MODEL;
+/** All credentials (config first, then env), with legacy migration applied. */
+export function getAllCredentials(): AiCredential[] {
+  const cfg = readFile();
+  const stored = withLegacyMigrated(cfg).map<AiCredential>((c) => ({ ...c, source: "config" }));
+  return [...stored, ...envCredentials(cfg.credentials)];
 }
 
-function maskKey(key: string): string {
+/** Only enabled credentials with a non-empty key — what the orchestrator uses. */
+export function getEnabledCredentials(): AiCredential[] {
+  return getAllCredentials().filter((c) => c.enabled && c.apiKey.trim());
+}
+
+function mask(key: string): string {
   if (!key) return "";
   if (key.length <= 10) return "•".repeat(key.length);
-  return `${key.slice(0, 6)}${"•".repeat(10)}${key.slice(-4)}`;
+  return `${key.slice(0, 6)}${"•".repeat(8)}${key.slice(-4)}`;
 }
 
-/** A redacted, safe-to-send view of the configuration for the Settings UI. */
 export function getConfigView(): ConfigView {
-  const file = readFile();
-  const fileKey = (file.geminiApiKey || "").trim();
-  const key = fileKey || envKey();
-  const keySource: KeySource = fileKey ? "config" : envKey() ? "env" : "none";
-
-  const fileModel = (file.visionModel || "").trim();
-  const envModel = (process.env.PREP_VISION_MODEL || "").trim();
-  const modelSource = fileModel ? "config" : envModel ? "env" : "default";
-
+  const creds = getAllCredentials();
   return {
-    hasKey: Boolean(key),
-    maskedKey: maskKey(key),
-    keySource,
-    model: getVisionModel(),
-    modelSource,
+    credentials: creds.map((c) => ({
+      id: c.id,
+      provider: c.provider,
+      providerLabel: PROVIDERS[c.provider].label,
+      model: c.model,
+      label: c.label,
+      enabled: c.enabled,
+      maskedKey: mask(c.apiKey),
+      source: c.source ?? "config",
+    })),
+    providers: PROVIDER_IDS.map((id) => {
+      const p = PROVIDERS[id];
+      return { id: p.id, label: p.label, defaultModel: p.defaultModel, models: p.models, keyHint: p.keyHint };
+    }),
+    hasAnyKey: creds.some((c) => c.enabled && c.apiKey.trim()),
   };
 }
 
-/** Apply a partial update. An empty-string key leaves the stored key untouched. */
-export function updateConfig(patch: { geminiApiKey?: string; visionModel?: string }): ConfigView {
-  const current = readFile();
-  const next: Partial<AppConfig> = { ...current };
+// ---- mutations (persist the legacy migration so it happens once) ----
 
-  if (typeof patch.geminiApiKey === "string" && patch.geminiApiKey.trim()) {
-    next.geminiApiKey = patch.geminiApiKey.trim();
-  }
-  if (typeof patch.visionModel === "string" && patch.visionModel.trim()) {
-    next.visionModel = patch.visionModel.trim();
-  }
+function loadForWrite(): AppConfig {
+  const cfg = readFile();
+  const migrated = withLegacyMigrated(cfg);
+  return { credentials: migrated }; // drop legacy fields once folded in
+}
 
-  writeFile(next);
+export interface CredentialInput {
+  provider: string;
+  apiKey: string;
+  model?: string;
+  label?: string;
+}
+
+export function addCredential(input: CredentialInput): ConfigView {
+  if (!isProviderId(input.provider)) throw new Error(`Unknown provider: ${input.provider}`);
+  const key = (input.apiKey || "").trim();
+  if (!key) throw new Error("An API key is required.");
+  const cfg = loadForWrite();
+  const model = (input.model || "").trim() || PROVIDERS[input.provider].defaultModel;
+  cfg.credentials.push({
+    id: crypto.randomUUID(),
+    provider: input.provider,
+    apiKey: key,
+    model,
+    label: (input.label || "").trim() || undefined,
+    enabled: true,
+  });
+  writeFile(cfg);
   return getConfigView();
 }
 
-/** Remove the stored key from the config file (env fallback still applies). */
-export function clearStoredKey(): ConfigView {
-  const current = readFile();
-  delete current.geminiApiKey;
-  writeFile(current);
+export interface CredentialPatch {
+  model?: string;
+  label?: string;
+  apiKey?: string;
+  enabled?: boolean;
+}
+
+export function updateCredential(id: string, patch: CredentialPatch): ConfigView {
+  const cfg = loadForWrite();
+  const cred = cfg.credentials.find((c) => c.id === id);
+  if (!cred) throw new Error("Credential not found (env-sourced keys are read-only).");
+  if (typeof patch.model === "string" && patch.model.trim()) cred.model = patch.model.trim();
+  if (typeof patch.label === "string") cred.label = patch.label.trim() || undefined;
+  if (typeof patch.apiKey === "string" && patch.apiKey.trim()) cred.apiKey = patch.apiKey.trim();
+  if (typeof patch.enabled === "boolean") cred.enabled = patch.enabled;
+  writeFile(cfg);
   return getConfigView();
+}
+
+export function removeCredential(id: string): ConfigView {
+  const cfg = loadForWrite();
+  cfg.credentials = cfg.credentials.filter((c) => c.id !== id);
+  writeFile(cfg);
+  return getConfigView();
+}
+
+/** The stored key for a credential id, for the server-side connectivity test. */
+export function getCredentialKey(id: string): string | null {
+  return getAllCredentials().find((c) => c.id === id)?.apiKey ?? null;
 }

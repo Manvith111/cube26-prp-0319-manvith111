@@ -110,16 +110,22 @@ Requirements: Node 18+.
 npm install
 ```
 
-Set your Gemini key so the vision + find steps run (copy `.env.example` to
-`.env.local`) — or add it later on the in-app **Settings** page:
+Add at least one AI provider key so the vision + find steps run — on the in-app
+**Settings** page, or in `.env.local` (copy `.env.example`):
 
 ```bash
-# .env.local
-GEMINI_API_KEY=...        # Google AI Studio key (GOOGLE_API_KEY also accepted)
-# optional — override the model: PREP_VISION_MODEL=gemini-2.5-flash
+# .env.local — any one is enough; add several to pool across providers/keys
+GEMINI_API_KEY=...        # Google AI Studio (GOOGLE_API_KEY also accepted)
+# ANTHROPIC_API_KEY=...   # Claude
+# OPENAI_API_KEY=...      # OpenAI
 ```
 
-> Without a key the app still runs end to end — every check safely returns
+**Multiple keys & providers work at once.** The inspector tries the configured
+keys in order and fails over automatically — so several free-tier keys (even
+across Gemini / Claude / OpenAI) share the load and dodge per-key rate limits.
+Manage the pool on **Settings**. See [ARCHITECTURE.md](ARCHITECTURE.md §3).
+
+> With no key the app still runs end to end — every check safely returns
 > `UNCERTAIN` with a note, demonstrating principle #1.
 
 ```bash

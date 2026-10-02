@@ -10,25 +10,14 @@
 // the same observation code serves any marketplace rulebook.
 
 import { z } from "zod";
-import { getGeminiApiKey, getVisionModel } from "./settings";
+import { callAi, NoCredentialsError } from "./ai";
+import type { PhotoInput } from "./ai/types";
 import type { CheckDef } from "./prepRequirements";
 import type { RulePack } from "./rulePacks";
 import type { CheckId, ProductInput, VisionResult } from "./types";
 
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-
-// When the chosen model is temporarily overloaded, fall back to this one so a
-// transient "high demand" spike doesn't fail the whole inspection.
-const FALLBACK_MODEL = "gemini-flash-lite-latest";
-
-// Errors that would fail on every model (bad/missing key, permission, blocked
-// content) — no point trying the fallback model. Everything else (overload,
-// deprecated model, parse hiccup, empty response) is worth a fallback attempt.
-function failsEverywhere(message: string): boolean {
-  return /api[_ ]?key|api_key_invalid|permission|permission_denied|unauthor|\b401\b|\b403\b|blocked|safety/i.test(
-    message,
-  );
-}
+// Re-exported so existing importers (find.ts) keep a single source for the type.
+export type { PhotoInput };
 
 const confidence = z.enum(["high", "medium", "low"]);
 
@@ -61,12 +50,6 @@ const visionSchema = z.object({
     )
     .default([]),
 });
-
-export interface PhotoInput {
-  index: number;
-  mediaType: string;
-  dataBase64: string;
-}
 
 function applicableObservable(product: ProductInput, pack: RulePack): CheckDef[] {
   // Checks the AI should observe: verifiable, apply to the product, and not
@@ -161,144 +144,31 @@ function emptyResult(
   };
 }
 
-interface GeminiResponse {
-  candidates?: {
-    content?: { parts?: { text?: string }[] };
-    finishReason?: string;
-  }[];
-  promptFeedback?: { blockReason?: string };
-  error?: {
-    message?: string;
-    status?: string;
-    details?: { "@type"?: string; retryDelay?: string }[];
-  };
-}
-
-// Free-tier RPM limits are hit easily, so a 429 is usually transient: wait the
-// delay the server suggests and retry a couple of times before giving up.
-// Kept modest so cumulative waits stay inside the API routes' maxDuration
-// (find = 60s, inspect = 120s): worst case ~2 waits x 15s = 30s.
-const QUOTA_MAX_RETRIES = 2;
-const QUOTA_MAX_WAIT_MS = 15_000; // never block a request longer than this per wait
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-// Pull the suggested wait from a 429's RetryInfo ("5.6s" / "5623ms"); fall back
-// to exponential backoff when the server didn't say.
-function retryDelayMs(data: GeminiResponse, attempt: number): number {
-  const raw = data.error?.details?.find((d) => d.retryDelay)?.retryDelay;
-  if (raw) {
-    const m = /([\d.]+)\s*(ms|s)?/.exec(raw);
-    if (m) {
-      const n = parseFloat(m[1]);
-      const ms = m[2] === "ms" ? n : n * 1000;
-      return Math.min(Math.ceil(ms) + 250, QUOTA_MAX_WAIT_MS); // small cushion
-    }
-  }
-  return Math.min(1000 * 2 ** attempt, QUOTA_MAX_WAIT_MS);
-}
-
-export async function callGemini(
-  apiKey: string,
-  model: string,
-  system: string,
-  userText: string,
-  photos: PhotoInput[],
-): Promise<string> {
-  const parts = [
-    ...photos.map((p) => ({
-      inline_data: { mime_type: p.mediaType || "image/jpeg", data: p.dataBase64 },
-    })),
-    { text: userText },
-  ];
-
-  const body = {
-    systemInstruction: { parts: [{ text: system }] },
-    contents: [{ role: "user", parts }],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 8192,
-      responseMimeType: "application/json",
-    },
-  };
-
-  let data: GeminiResponse = {};
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${GEMINI_BASE}/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-goog-api-key": apiKey },
-      body: JSON.stringify(body),
-    });
-
-    data = (await res.json().catch(() => ({}))) as GeminiResponse;
-    if (res.ok) break;
-
-    const isQuota = res.status === 429 || data.error?.status === "RESOURCE_EXHAUSTED";
-    if (isQuota && attempt < QUOTA_MAX_RETRIES) {
-      await sleep(retryDelayMs(data, attempt));
-      continue;
-    }
-    const msg = data?.error?.message || `HTTP ${res.status}`;
-    throw new Error(`Gemini API error: ${msg}`);
-  }
-
-  if (data.promptFeedback?.blockReason) {
-    throw new Error(`Gemini blocked the request: ${data.promptFeedback.blockReason}`);
-  }
-
-  const text = (data.candidates?.[0]?.content?.parts || [])
-    .map((p) => p.text || "")
-    .join("\n")
-    .trim();
-
-  if (!text) throw new Error("Gemini returned an empty response.");
-  return text;
-}
-
 export async function observe(
   product: ProductInput,
   photos: PhotoInput[],
   pack: RulePack,
 ): Promise<VisionResult> {
-  const model = getVisionModel();
-  if (photos.length === 0) return emptyResult(product, photos, model, "No photos were provided.", pack);
-
-  const apiKey = getGeminiApiKey();
-  if (!apiKey) {
-    return emptyResult(
-      product,
-      photos,
-      model,
-      "AI vision unavailable: no Gemini API key configured. Add one on the Settings page (or set GEMINI_API_KEY).",
-      pack,
-    );
-  }
+  if (photos.length === 0) return emptyResult(product, photos, "none", "No photos were provided.", pack);
 
   const { system, userText } = buildPrompt(product, pack);
   const knownCheckIds = new Set<string>(pack.checks.map((c) => c.id));
 
-  // Try the chosen model, then (only on a transient/capacity error) the fallback.
-  const candidates = model === FALLBACK_MODEL ? [model] : [model, FALLBACK_MODEL];
-
+  // callAi tries every configured key/provider in turn, so a quota-limited or
+  // failing credential fails over to the next automatically.
   let raw = "";
-  let lastError = "Unknown observation failure.";
-  for (const candidate of candidates) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        raw = await callGemini(apiKey, candidate, system, userText, photos);
-        const parsed = visionSchema.parse(extractJson(raw));
-        return mapResult(parsed, candidate, raw, knownCheckIds);
-      } catch (e) {
-        lastError = describe(e);
-        // Auth/permission/safety errors fail on every model — stop immediately.
-        if (failsEverywhere(lastError)) {
-          return emptyResult(product, photos, model, `AI observation failed: ${lastError}`, pack, raw);
-        }
-        // Otherwise retry once on this model, then fall through to the fallback.
-      }
-    }
+  try {
+    const result = await callAi(system, userText, photos);
+    raw = result.text;
+    const parsed = visionSchema.parse(extractJson(raw));
+    return mapResult(parsed, `${result.provider}:${result.model}`, raw, knownCheckIds);
+  } catch (e) {
+    const note =
+      e instanceof NoCredentialsError
+        ? "AI vision unavailable: no provider configured. Add a key on the Settings page."
+        : `AI observation failed: ${describe(e)}`;
+    return emptyResult(product, photos, "none", note, pack, raw);
   }
-  return emptyResult(product, photos, model, `AI observation failed: ${lastError}`, pack, raw);
 }
 
 function mapResult(
